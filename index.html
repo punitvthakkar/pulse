@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>ECHO - Geometric Pulse Game</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            background: #000;
+            overflow: hidden;
+            font-family: 'Courier New', monospace;
+            color: white;
+            touch-action: none;
+            user-select: none;
+        }
+        
+        canvas {
+            display: block;
+            touch-action: none;
+            cursor: crosshair;
+        }
+        
+        .ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            font-size: 18px;
+            z-index: 10;
+            pointer-events: none;
+        }
+        
+        .game-over {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            font-size: 24px;
+            z-index: 20;
+            pointer-events: auto;
+            background: rgba(0,0,0,0.8);
+            padding: 40px;
+            border: 2px solid white;
+        }
+        
+        .hidden {
+            display: none;
+        }
+        
+        .restart-btn {
+            margin-top: 20px;
+            font-size: 18px;
+            color: white;
+            cursor: pointer;
+            border: 1px solid white;
+            background: transparent;
+            padding: 10px 20px;
+            font-family: inherit;
+        }
+        
+        .restart-btn:hover {
+            background: white;
+            color: black;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    
+    <div class="ui">
+        <div>Score: <span id="score">0</span></div>
+        <div>Lives: <span id="lives">3</span></div>
+        <div>High Score: <span id="highScore">0</span></div>
+    </div>
+    
+    <div id="gameOverScreen" class="game-over hidden">
+        <h2>GAME OVER</h2>
+        <div style="margin: 20px 0;">Final Score: <span id="finalScore">0</span></div>
+        <div style="margin: 20px 0;">Session High: <span id="sessionHigh">0</span></div>
+        <button class="restart-btn" onclick="restartGame()">TAP TO RESTART</button>
+    </div>
+
+    <script>
+        // Audio Context Setup
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        
+        function createTone(frequency, duration, type = 'sine') {
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            
+            oscillator.frequency.value = frequency;
+            oscillator.type = type;
+            
+            gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration);
+            
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + duration);
+        }
+        
+        function playPulseSound() {
+            createTone(800, 0.1);
+        }
+        
+        function playShapeHit(shapeType) {
+            const frequencies = {
+                'circle': 400,
+                'triangle': 600,
+                'square': 500
+            };
+            createTone(frequencies[shapeType], 0.15);
+        }
+        
+        function playScoring(count) {
+            const baseFreq = 600;
+            for (let i = 0; i < count; i++) {
+                setTimeout(() => {
+                    createTone(baseFreq + (i * 100), 0.2);
+                }, i * 50);
+            }
+        }
+        
+        function playLifeLost() {
+            createTone(200, 0.5);
+        }
+
+        // Canvas Setup
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+        
+        // Game State
+        let gameState = {
+            shapes: [],
+            pulses: [],
+            connections: [],
+            lives: 3,
+            score: 0,
+            highScore: parseInt(localStorage.getItem('echoHighScore') || '0'),
+            lastPulseTime: 0,
+            gameSpeed: 1.0,
+            gameRunning: true,
+            lastSpawnTime: 0,
+            lastDifficultyUpdate: 0
+        };
+        
+        // Shape Colors and Types
+        const COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A']; // red, teal, blue, orange
+        const SHAPE_TYPES = ['circle', 'triangle', 'square'];
+        
+        // Utility Functions
+        function getScreenDiagonal() {
+            return Math.sqrt(canvas.width * canvas.width + canvas.height * canvas.height);
+        }
+        
+        function getShapeSize() {
+            return getScreenDiagonal() * 0.04;
+        }
+        
+        function getPulseSpeed() {
+            return getScreenDiagonal() * 0.3;
+        }
+        
+        function randomRange(min, max) {
+            return Math.random() * (max - min) + min;
+        }
+        
+        function distance(x1, y1, x2, y2) {
+            return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+        }
+        
+        // Shape Class
+        class Shape {
+            constructor(x, y, velocityX, velocityY, type, color) {
+                this.x = x; // 0-1 relative coordinates
+                this.y = y;
+                this.velocityX = velocityX;
+                this.velocityY = velocityY;
+                this.type = type;
+                this.color = color;
+                this.isGlowing = false;
+                this.isWarning = false;
+                this.glowStartTime = 0;
+                this.warningStartTime = 0;
+                this.scale = 1.0;
+                this.targetScale = 1.0;
+            }
+            
+            update(deltaTime) {
+                // Movement
+                this.x += this.velocityX * deltaTime * gameState.gameSpeed;
+                this.y += this.velocityY * deltaTime * gameState.gameSpeed;
+                
+                // Boundary wrapping with buffer
+                const buffer = 0.1;
+                if (this.x < -buffer || this.x > 1 + buffer || this.y < -buffer || this.y > 1 + buffer) {
+                    return false; // Mark for removal
+                }
+                
+                // Update glow states
+                const currentTime = Date.now();
+                if (this.isGlowing && currentTime - this.glowStartTime > 500) {
+                    this.isGlowing = false;
+                }
+                
+                if (this.isWarning && currentTime - this.warningStartTime > 3000) {
+                    this.isWarning = false;
+                    // Life lost!
+                    gameState.lives--;
+                    playLifeLost();
+                    if (gameState.lives <= 0) {
+                        gameOver();
+                    }
+                }
+                
+                // Scale animation
+                this.scale += (this.targetScale - this.scale) * 0.2;
+                
+                return true;
+            }
+            
+            startGlow() {
+                this.isGlowing = true;
+                this.glowStartTime = Date.now();
+                this.targetScale = 1.1;
+                setTimeout(() => this.targetScale = 1.0, 200);
+            }
+            
+            startWarning() {
+                if (!this.isWarning) {
+                    this.isWarning = true;
+                    this.warningStartTime = Date.now();
+                }
+            }
+            
+            draw() {
+                const screenX = this.x * canvas.width;
+                const screenY = this.y * canvas.height;
+                const size = getShapeSize() * this.scale;
+                
+                ctx.save();
+                ctx.translate(screenX, screenY);
+                
+                // Warning glow
+                if (this.isWarning) {
+                    ctx.shadowColor = 'white';
+                    ctx.shadowBlur = 20;
+                }
+                
+                // Bright glow
+                if (this.isGlowing) {
+                    ctx.shadowColor = 'white';
+                    ctx.shadowBlur = 30;
+                }
+                
+                ctx.fillStyle = this.color;
+                ctx.strokeStyle = this.isWarning ? 'rgba(255,255,255,0.5)' : 'transparent';
+                ctx.lineWidth = 2;
+                
+                // Draw shape
+                if (this.type === 'circle') {
+                    ctx.beginPath();
+                    ctx.arc(0, 0, size / 2, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                } else if (this.type === 'triangle') {
+                    ctx.beginPath();
+                    ctx.moveTo(0, -size / 2);
+                    ctx.lineTo(-size / 2, size / 2);
+                    ctx.lineTo(size / 2, size / 2);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+                } else if (this.type === 'square') {
+                    ctx.fillRect(-size / 2, -size / 2, size, size);
+                    ctx.strokeRect(-size / 2, -size / 2, size, size);
+                }
+                
+                ctx.restore();
+            }
+        }
+        
+        // Pulse Class
+        class Pulse {
+            constructor(x, y) {
+                this.x = x; // screen coordinates
+                this.y = y;
+                this.radius = 0;
+                this.maxRadius = getScreenDiagonal();
+                this.speed = getPulseSpeed();
+                this.hitShapes = new Set();
+            }
+            
+            update(deltaTime) {
+                this.radius += this.speed * deltaTime;
+                
+                // Check collisions with shapes
+                gameState.shapes.forEach(shape => {
+                    if (this.hitShapes.has(shape)) return;
+                    
+                    const shapeScreenX = shape.x * canvas.width;
+                    const shapeScreenY = shape.y * canvas.height;
+                    const shapeRadius = getShapeSize() / 2;
+                    
+                    const dist = distance(this.x, this.y, shapeScreenX, shapeScreenY);
+                    
+                    if (Math.abs(dist - this.radius) < shapeRadius) {
+                        this.hitShapes.add(shape);
+                        shape.startGlow();
+                        playShapeHit(shape.type);
+                    }
+                });
+                
+                return this.radius < this.maxRadius;
+            }
+            
+            draw() {
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+        
+        // Connection Line Class
+        class Connection {
+            constructor(shapes) {
+                this.shapes = shapes;
+                this.startTime = Date.now();
+                this.duration = 500;
+            }
+            
+            update() {
+                return Date.now() - this.startTime < this.duration;
+            }
+            
+            draw() {
+                const alpha = 1 - (Date.now() - this.startTime) / this.duration;
+                ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+                ctx.lineWidth = 2;
+                
+                ctx.beginPath();
+                for (let i = 0; i < this.shapes.length; i++) {
+                    const shape = this.shapes[i];
+                    const x = shape.x * canvas.width;
+                    const y = shape.y * canvas.height;
+                    
+                    if (i === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                }
+                ctx.stroke();
+            }
+        }
+        
+        // Shape Spawning
+        function spawnShape() {
+            const edge = Math.floor(Math.random() * 4); // 0=top, 1=right, 2=bottom, 3=left
+            let x, y, velocityX, velocityY;
+            
+            // Spawn position on edge
+            if (edge === 0) { // top
+                x = Math.random();
+                y = -0.05;
+                velocityX = randomRange(-0.02, 0.02);
+                velocityY = randomRange(0.03, 0.07);
+            } else if (edge === 1) { // right
+                x = 1.05;
+                y = Math.random();
+                velocityX = randomRange(-0.07, -0.03);
+                velocityY = randomRange(-0.02, 0.02);
+            } else if (edge === 2) { // bottom
+                x = Math.random();
+                y = 1.05;
+                velocityX = randomRange(-0.02, 0.02);
+                velocityY = randomRange(-0.07, -0.03);
+            } else { // left
+                x = -0.05;
+                y = Math.random();
+                velocityX = randomRange(0.03, 0.07);
+                velocityY = randomRange(-0.02, 0.02);
+            }
+            
+            // Bias toward center
+            const centerX = 0.5, centerY = 0.5;
+            const centerBias = 0.5;
+            velocityX += (centerX - x) * centerBias * 0.05;
+            velocityY += (centerY - y) * centerBias * 0.05;
+            
+            const type = SHAPE_TYPES[Math.floor(Math.random() * SHAPE_TYPES.length)];
+            const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+            
+            gameState.shapes.push(new Shape(x, y, velocityX, velocityY, type, color));
+        }
+        
+        // Opportunity Detection
+        function detectOpportunities() {
+            const pulseRadius = getScreenDiagonal() * 0.6; // Generous pulse reach
+            
+            for (let i = 0; i < gameState.shapes.length; i++) {
+                for (let j = i + 1; j < gameState.shapes.length; j++) {
+                    const shape1 = gameState.shapes[i];
+                    const shape2 = gameState.shapes[j];
+                    
+                    // Same type and color?
+                    if (shape1.type === shape2.type && shape1.color === shape2.color) {
+                        const dist = distance(
+                            shape1.x * canvas.width, shape1.y * canvas.height,
+                            shape2.x * canvas.width, shape2.y * canvas.height
+                        );
+                        
+                        if (dist < pulseRadius) {
+                            shape1.startWarning();
+                            shape2.startWarning();
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Scoring
+        function checkScoring() {
+            const glowingGroups = {};
+            
+            // Group glowing shapes by type+color
+            gameState.shapes.forEach(shape => {
+                if (shape.isGlowing) {
+                    const key = `${shape.type}-${shape.color}`;
+                    if (!glowingGroups[key]) {
+                        glowingGroups[key] = [];
+                    }
+                    glowingGroups[key].push(shape);
+                }
+            });
+            
+            // Score groups with 2+ shapes
+            Object.values(glowingGroups).forEach(group => {
+                if (group.length >= 2) {
+                    const points = group.length * group.length;
+                    gameState.score += points;
+                    playScoring(group.length);
+                    
+                    // Create connection lines
+                    gameState.connections.push(new Connection(group));
+                    
+                    // Clear warnings for scored shapes
+                    group.forEach(shape => {
+                        shape.isWarning = false;
+                    });
+                }
+            });
+        }
+        
+        // Input Handling
+        function handlePulse(clientX, clientY) {
+            if (!gameState.gameRunning) return;
+            
+            const currentTime = Date.now();
+            if (currentTime - gameState.lastPulseTime < 1000) return; // Cooldown
+            
+            // Enable audio context on first interaction
+            if (audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+            
+            gameState.lastPulseTime = currentTime;
+            gameState.pulses.push(new Pulse(clientX, clientY));
+            playPulseSound();
+        }
+        
+        // Event Listeners
+        canvas.addEventListener('click', (e) => {
+            handlePulse(e.clientX, e.clientY);
+        });
+        
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            handlePulse(touch.clientX, touch.clientY);
+        });
+        
+        // Game Over
+        function gameOver() {
+            gameState.gameRunning = false;
+            
+            if (gameState.score > gameState.highScore) {
+                gameState.highScore = gameState.score;
+                localStorage.setItem('echoHighScore', gameState.highScore.toString());
+            }
+            
+            document.getElementById('finalScore').textContent = gameState.score;
+            document.getElementById('sessionHigh').textContent = gameState.highScore;
+            document.getElementById('gameOverScreen').classList.remove('hidden');
+        }
+        
+        // Restart Game
+        function restartGame() {
+            gameState = {
+                shapes: [],
+                pulses: [],
+                connections: [],
+                lives: 3,
+                score: 0,
+                highScore: gameState.highScore,
+                lastPulseTime: 0,
+                gameSpeed: 1.0,
+                gameRunning: true,
+                lastSpawnTime: 0,
+                lastDifficultyUpdate: 0
+            };
+            
+            document.getElementById('gameOverScreen').classList.add('hidden');
+        }
+        
+        // UI Update
+        function updateUI() {
+            document.getElementById('score').textContent = gameState.score;
+            document.getElementById('lives').textContent = gameState.lives;
+            document.getElementById('highScore').textContent = gameState.highScore;
+        }
+        
+        // Game Loop
+        let lastTime = 0;
+        
+        function gameLoop(currentTime) {
+            const deltaTime = (currentTime - lastTime) / 1000;
+            lastTime = currentTime;
+            
+            if (gameState.gameRunning) {
+                // Spawn shapes
+                if (currentTime - gameState.lastSpawnTime > 2500) {
+                    if (gameState.shapes.length < 12) {
+                        spawnShape();
+                    }
+                    gameState.lastSpawnTime = currentTime;
+                }
+                
+                // Increase difficulty
+                if (currentTime - gameState.lastDifficultyUpdate > 2000) {
+                    gameState.gameSpeed += 0.02;
+                    gameState.lastDifficultyUpdate = currentTime;
+                }
+                
+                // Update game objects
+                gameState.shapes = gameState.shapes.filter(shape => shape.update(deltaTime));
+                gameState.pulses = gameState.pulses.filter(pulse => pulse.update(deltaTime));
+                gameState.connections = gameState.connections.filter(connection => connection.update());
+                
+                // Game logic
+                detectOpportunities();
+                checkScoring();
+                updateUI();
+            }
+            
+            // Render
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw connections
+            gameState.connections.forEach(connection => connection.draw());
+            
+            // Draw shapes
+            gameState.shapes.forEach(shape => shape.draw());
+            
+            // Draw pulses
+            gameState.pulses.forEach(pulse => pulse.draw());
+            
+            requestAnimationFrame(gameLoop);
+        }
+        
+        // Initialize
+        updateUI();
+        requestAnimationFrame(gameLoop);
+        
+        // Initial shapes
+        for (let i = 0; i < 8; i++) {
+            setTimeout(() => spawnShape(), i * 300);
+        }
+    </script>
+</body>
+</html>
