@@ -94,16 +94,6 @@
             background: white;
             color: black;
         }
-        
-        .pulse-animation {
-            animation: pulse 1s infinite;
-        }
-        
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
-        }
     </style>
 </head>
 <body>
@@ -186,48 +176,43 @@
         resizeCanvas();
         window.addEventListener('resize', resizeCanvas);
         
-        // Tutorial System
+        // Tutorial System - FIXED
         let tutorialState = {
             active: true,
             stage: 0,
             startTime: 0,
             stageStartTime: 0,
-            hasPlayerPulsed: false,
-            shapesHit: false,
-            scoringShown: false,
-            warningShown: false
+            nextStageTime: 0
         };
         
         const tutorialStages = [
             {
                 text: "TAP ANYWHERE TO CREATE A PULSE",
                 subText: "The white ring will expand and hit shapes",
-                duration: 999999, // Wait for player action
-                condition: () => tutorialState.hasPlayerPulsed
+                nextAction: "pulse"
             },
             {
                 text: "GREAT! PULSE HITS SHAPES",
                 subText: "When shapes glow white, they're activated",
-                duration: 2000,
-                condition: () => true
+                nextAction: "wait",
+                waitTime: 2000
             },
             {
                 text: "SAME SHAPES GLOWING = POINTS!",
                 subText: "Connect 2+ identical shapes for scoring",
-                duration: 2500,
-                condition: () => tutorialState.scoringShown
+                nextAction: "auto_demo"
             },
             {
                 text: "WHITE GLOW = OPPORTUNITY!",
                 subText: "Pulse within 3 seconds or lose a life",
-                duration: 3000,
-                condition: () => tutorialState.warningShown
+                nextAction: "wait",
+                waitTime: 3000
             },
             {
                 text: "NOW YOU'RE READY!",
                 subText: "Survive as long as you can",
-                duration: 1500,
-                condition: () => true
+                nextAction: "wait",
+                waitTime: 1500
             }
         ];
         
@@ -272,7 +257,7 @@
             return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
         }
         
-        // Tutorial Functions
+        // Tutorial Functions - COMPLETELY REWRITTEN
         function updateTutorial(currentTime) {
             if (!tutorialState.active) return;
             
@@ -293,51 +278,54 @@
             document.getElementById('tutorialText').textContent = currentStage.text;
             document.getElementById('tutorialSub').textContent = currentStage.subText;
             
-            // Check stage completion
-            const stageTime = currentTime - tutorialState.stageStartTime;
-            if (stageTime >= currentStage.duration && currentStage.condition()) {
-                tutorialState.stage++;
-                tutorialState.stageStartTime = currentTime;
+            // Check for stage progression
+            if (tutorialState.nextStageTime > 0 && currentTime >= tutorialState.nextStageTime) {
+                nextTutorialStage(currentTime);
+            }
+        }
+        
+        function nextTutorialStage(currentTime) {
+            tutorialState.stage++;
+            tutorialState.stageStartTime = currentTime;
+            tutorialState.nextStageTime = 0;
+            
+            const newStage = tutorialStages[tutorialState.stage];
+            if (newStage) {
+                if (newStage.nextAction === "wait") {
+                    tutorialState.nextStageTime = currentTime + newStage.waitTime;
+                } else if (newStage.nextAction === "auto_demo") {
+                    // Trigger auto demo for scoring
+                    setTimeout(() => {
+                        if (tutorialState.stage === 2) { // scoring stage
+                            const centerX = canvas.width * 0.5;
+                            const centerY = canvas.height * 0.4;
+                            gameState.pulses.push(new Pulse(centerX, centerY));
+                            playPulseSound();
+                            tutorialState.nextStageTime = Date.now() + 2500;
+                        }
+                    }, 500);
+                }
             }
         }
         
         function spawnTutorialShapes() {
             if (!tutorialState.active) return;
             
-            // Clear existing shapes
-            gameState.shapes = [];
+            // Only spawn shapes once per stage
+            if (gameState.shapes.length > 0) return;
             
-            if (tutorialState.stage === 0) {
-                // Stage 1: Simple shapes to demonstrate pulse
-                gameState.shapes.push(new Shape(0.3, 0.4, 0, 0, 'circle', COLORS[0]));
-                gameState.shapes.push(new Shape(0.7, 0.6, 0, 0, 'square', COLORS[1]));
-            } else if (tutorialState.stage === 1) {
-                // Stage 2: Same as stage 1, just showing the effect
+            if (tutorialState.stage === 0 || tutorialState.stage === 1) {
+                // Stage 1-2: Basic shapes to demonstrate pulse
                 gameState.shapes.push(new Shape(0.3, 0.4, 0, 0, 'circle', COLORS[0]));
                 gameState.shapes.push(new Shape(0.7, 0.6, 0, 0, 'square', COLORS[1]));
             } else if (tutorialState.stage === 2) {
                 // Stage 3: Two same shapes for scoring demo
                 gameState.shapes.push(new Shape(0.35, 0.4, 0, 0, 'circle', COLORS[0]));
                 gameState.shapes.push(new Shape(0.65, 0.4, 0, 0, 'circle', COLORS[0]));
-                
-                // Auto-trigger scoring demonstration
-                if (!tutorialState.scoringShown) {
-                    setTimeout(() => {
-                        if (tutorialState.stage === 2) {
-                            // Auto-pulse to show scoring
-                            const centerX = canvas.width * 0.5;
-                            const centerY = canvas.height * 0.4;
-                            gameState.pulses.push(new Pulse(centerX, centerY));
-                            playPulseSound();
-                            tutorialState.scoringShown = true;
-                        }
-                    }, 500);
-                }
             } else if (tutorialState.stage === 3) {
                 // Stage 4: Warning demonstration
                 gameState.shapes.push(new Shape(0.4, 0.5, 0.01, 0, 'triangle', COLORS[2]));
                 gameState.shapes.push(new Shape(0.6, 0.5, -0.01, 0, 'triangle', COLORS[2]));
-                tutorialState.warningShown = true;
             }
         }
         
@@ -346,7 +334,7 @@
             constructor(shapes) {
                 this.shapes = shapes;
                 this.startTime = Date.now();
-                this.duration = tutorialState.active ? 5000 : 3000; // Longer in tutorial
+                this.duration = tutorialState.active ? 5000 : 3000;
                 this.fulfilled = false;
                 this.type = shapes[0].type;
                 this.color = shapes[0].color;
@@ -437,10 +425,6 @@
                 this.glowStartTime = Date.now();
                 this.targetScale = 1.1;
                 setTimeout(() => this.targetScale = 1.0, 200);
-                
-                if (tutorialState.active && tutorialState.stage === 0) {
-                    tutorialState.shapesHit = true;
-                }
             }
             
             draw() {
@@ -567,7 +551,7 @@
         
         // Shape Spawning
         function spawnShape() {
-            if (tutorialState.active) return; // No random spawning during tutorial
+            if (tutorialState.active) return;
             
             const edge = Math.floor(Math.random() * 4);
             let x, y, velocityX, velocityY;
@@ -710,7 +694,7 @@
             });
         }
         
-        // Input Handling
+        // Input Handling - FIXED
         function handlePulse(clientX, clientY) {
             if (!gameState.gameRunning) return;
             
@@ -725,8 +709,9 @@
             gameState.pulses.push(new Pulse(clientX, clientY));
             playPulseSound();
             
+            // FIXED: Tutorial progression on pulse
             if (tutorialState.active && tutorialState.stage === 0) {
-                tutorialState.hasPlayerPulsed = true;
+                tutorialState.nextStageTime = currentTime + 1000; // Progress after 1 second
             }
         }
         
@@ -777,10 +762,7 @@
                 stage: 0,
                 startTime: 0,
                 stageStartTime: 0,
-                hasPlayerPulsed: false,
-                shapesHit: false,
-                scoringShown: false,
-                warningShown: false
+                nextStageTime: 0
             };
             
             document.getElementById('gameOverScreen').classList.add('hidden');
