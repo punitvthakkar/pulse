@@ -150,6 +150,7 @@
             shapes: [],
             pulses: [],
             connections: [],
+            opportunities: [], // NEW: Track opportunity groups
             lives: 3,
             score: 0,
             highScore: parseInt(localStorage.getItem('echoHighScore') || '0'),
@@ -185,6 +186,61 @@
             return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
         }
         
+        // Opportunity Class - NEW
+        class Opportunity {
+            constructor(shapes) {
+                this.shapes = shapes; // Array of shapes in this opportunity
+                this.startTime = Date.now();
+                this.duration = 3000; // 3 seconds
+                this.fulfilled = false;
+                this.type = shapes[0].type;
+                this.color = shapes[0].color;
+            }
+            
+            isExpired() {
+                return Date.now() - this.startTime > this.duration;
+            }
+            
+            isValid() {
+                // Check if shapes are still close enough and same type/color
+                if (this.shapes.length < 2) return false;
+                
+                const pulseRadius = getScreenDiagonal() * 0.6;
+                
+                for (let i = 0; i < this.shapes.length; i++) {
+                    for (let j = i + 1; j < this.shapes.length; j++) {
+                        const shape1 = this.shapes[i];
+                        const shape2 = this.shapes[j];
+                        
+                        // Check if still same type/color
+                        if (shape1.type !== this.type || shape1.color !== this.color ||
+                            shape2.type !== this.type || shape2.color !== this.color) {
+                            return false;
+                        }
+                        
+                        // Check if still close enough
+                        const dist = distance(
+                            shape1.x * canvas.width, shape1.y * canvas.height,
+                            shape2.x * canvas.width, shape2.y * canvas.height
+                        );
+                        
+                        if (dist < pulseRadius) {
+                            return true; // At least one pair is still close
+                        }
+                    }
+                }
+                return false;
+            }
+            
+            checkFulfilled() {
+                // Check if all shapes in this opportunity are currently glowing
+                const allGlowing = this.shapes.every(shape => shape.isGlowing);
+                if (allGlowing && this.shapes.length >= 2) {
+                    this.fulfilled = true;
+                }
+            }
+        }
+        
         // Shape Class
         class Shape {
             constructor(x, y, velocityX, velocityY, type, color) {
@@ -195,9 +251,8 @@
                 this.type = type;
                 this.color = color;
                 this.isGlowing = false;
-                this.isWarning = false;
+                this.isInOpportunity = false; // NEW: Whether this shape is part of any opportunity
                 this.glowStartTime = 0;
-                this.warningStartTime = 0;
                 this.scale = 1.0;
                 this.targetScale = 1.0;
             }
@@ -213,20 +268,10 @@
                     return false; // Mark for removal
                 }
                 
-                // Update glow states
+                // Update glow state
                 const currentTime = Date.now();
                 if (this.isGlowing && currentTime - this.glowStartTime > 500) {
                     this.isGlowing = false;
-                }
-                
-                if (this.isWarning && currentTime - this.warningStartTime > 3000) {
-                    this.isWarning = false;
-                    // Life lost!
-                    gameState.lives--;
-                    playLifeLost();
-                    if (gameState.lives <= 0) {
-                        gameOver();
-                    }
                 }
                 
                 // Scale animation
@@ -242,13 +287,6 @@
                 setTimeout(() => this.targetScale = 1.0, 200);
             }
             
-            startWarning() {
-                if (!this.isWarning) {
-                    this.isWarning = true;
-                    this.warningStartTime = Date.now();
-                }
-            }
-            
             draw() {
                 const screenX = this.x * canvas.width;
                 const screenY = this.y * canvas.height;
@@ -257,20 +295,20 @@
                 ctx.save();
                 ctx.translate(screenX, screenY);
                 
-                // Warning glow
-                if (this.isWarning) {
+                // Warning glow if in opportunity
+                if (this.isInOpportunity) {
                     ctx.shadowColor = 'white';
                     ctx.shadowBlur = 20;
                 }
                 
-                // Bright glow
+                // Bright glow when hit by pulse
                 if (this.isGlowing) {
                     ctx.shadowColor = 'white';
                     ctx.shadowBlur = 30;
                 }
                 
                 ctx.fillStyle = this.color;
-                ctx.strokeStyle = this.isWarning ? 'rgba(255,255,255,0.5)' : 'transparent';
+                ctx.strokeStyle = this.isInOpportunity ? 'rgba(255,255,255,0.5)' : 'transparent';
                 ctx.lineWidth = 2;
                 
                 // Draw shape
@@ -412,29 +450,94 @@
             gameState.shapes.push(new Shape(x, y, velocityX, velocityY, type, color));
         }
         
-        // Opportunity Detection
-        function detectOpportunities() {
-            const pulseRadius = getScreenDiagonal() * 0.6; // Generous pulse reach
+        // NEW: Opportunity Detection and Management
+        function updateOpportunities() {
+            // Clear all shape opportunity flags
+            gameState.shapes.forEach(shape => shape.isInOpportunity = false);
             
-            for (let i = 0; i < gameState.shapes.length; i++) {
-                for (let j = i + 1; j < gameState.shapes.length; j++) {
-                    const shape1 = gameState.shapes[i];
-                    const shape2 = gameState.shapes[j];
-                    
-                    // Same type and color?
-                    if (shape1.type === shape2.type && shape1.color === shape2.color) {
+            // Update existing opportunities
+            gameState.opportunities = gameState.opportunities.filter(opportunity => {
+                // Check if fulfilled
+                opportunity.checkFulfilled();
+                
+                if (opportunity.fulfilled) {
+                    return false; // Remove fulfilled opportunities
+                }
+                
+                if (opportunity.isExpired()) {
+                    // LIFE LOST - one per opportunity
+                    gameState.lives--;
+                    playLifeLost();
+                    if (gameState.lives <= 0) {
+                        gameOver();
+                    }
+                    return false; // Remove expired opportunity
+                }
+                
+                if (!opportunity.isValid()) {
+                    return false; // Remove invalid opportunities (shapes moved apart)
+                }
+                
+                // Mark shapes as being in opportunity
+                opportunity.shapes.forEach(shape => {
+                    if (gameState.shapes.includes(shape)) {
+                        shape.isInOpportunity = true;
+                    }
+                });
+                
+                return true; // Keep valid, unexpired opportunities
+            });
+            
+            // Detect new opportunities
+            const pulseRadius = getScreenDiagonal() * 0.6;
+            const typeColorGroups = {};
+            
+            // Group shapes by type and color
+            gameState.shapes.forEach(shape => {
+                const key = `${shape.type}-${shape.color}`;
+                if (!typeColorGroups[key]) {
+                    typeColorGroups[key] = [];
+                }
+                typeColorGroups[key].push(shape);
+            });
+            
+            // Check each group for close shapes
+            Object.values(typeColorGroups).forEach(group => {
+                if (group.length < 2) return;
+                
+                // Find all shapes that are close to at least one other shape in the group
+                const closeShapes = [];
+                
+                for (let i = 0; i < group.length; i++) {
+                    for (let j = i + 1; j < group.length; j++) {
+                        const shape1 = group[i];
+                        const shape2 = group[j];
+                        
                         const dist = distance(
                             shape1.x * canvas.width, shape1.y * canvas.height,
                             shape2.x * canvas.width, shape2.y * canvas.height
                         );
                         
                         if (dist < pulseRadius) {
-                            shape1.startWarning();
-                            shape2.startWarning();
+                            if (!closeShapes.includes(shape1)) closeShapes.push(shape1);
+                            if (!closeShapes.includes(shape2)) closeShapes.push(shape2);
                         }
                     }
                 }
-            }
+                
+                // If we have 2+ close shapes and no existing opportunity for them, create one
+                if (closeShapes.length >= 2) {
+                    const hasExistingOpportunity = gameState.opportunities.some(opp => {
+                        return opp.type === closeShapes[0].type && 
+                               opp.color === closeShapes[0].color &&
+                               closeShapes.some(shape => opp.shapes.includes(shape));
+                    });
+                    
+                    if (!hasExistingOpportunity) {
+                        gameState.opportunities.push(new Opportunity(closeShapes));
+                    }
+                }
+            });
         }
         
         // Scoring
@@ -461,11 +564,6 @@
                     
                     // Create connection lines
                     gameState.connections.push(new Connection(group));
-                    
-                    // Clear warnings for scored shapes
-                    group.forEach(shape => {
-                        shape.isWarning = false;
-                    });
                 }
             });
         }
@@ -518,6 +616,7 @@
                 shapes: [],
                 pulses: [],
                 connections: [],
+                opportunities: [],
                 lives: 3,
                 score: 0,
                 highScore: gameState.highScore,
@@ -565,8 +664,8 @@
                 gameState.pulses = gameState.pulses.filter(pulse => pulse.update(deltaTime));
                 gameState.connections = gameState.connections.filter(connection => connection.update());
                 
-                // Game logic
-                detectOpportunities();
+                // Game logic - NEW: Use opportunity system
+                updateOpportunities();
                 checkScoring();
                 updateUI();
             }
